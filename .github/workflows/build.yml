@@ -23,11 +23,9 @@ jobs:
     - name: Setup Gradle
       uses: gradle/actions/setup-gradle@v3
 
-    - name: Grant execute permission for gradlew
-      run: chmod +x gradlew
-
+    # Dùng lệnh gradle trực tiếp thay vì ./gradlew
     - name: Build with Gradle
-      run: ./gradlew build
+      run: gradle build
 
     - name: Upload Artifact
       uses: actions/upload-artifact@v4
