@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 1,
+  "id": "autofishmod",
+  "version": "${version}",
+  "name": "Auto Fish Mod",
+  "description": "Auto Fish & Re-bait for Minigame Server",
+  "authors": ["You"],
+  "contact": {},
+  "license": "MIT",
+  "environment": "client",
+  "entrypoints": {
+    "client": [
+      "com.autofish.AutoFishMod"
+    ]
+  },
+  "mixins": [
+    "autofishmod.mixins.json"
+  ],
+  "depends": {
+    "fabricloader": ">=0.16.0",
+    "minecraft": "~1.21.4",
+    "java": ">=21"
+  }
+}
