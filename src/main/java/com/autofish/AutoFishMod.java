@@ -185,9 +185,10 @@ public class AutoFishMod implements ClientModInitializer {
         return cleanText.contains("█") || cleanText.contains("☀️") || cleanText.contains("☀") || cleanText.contains("%");
     }
 
-    private void controlShiftForMinigame(MinecraftClient client, String rawText) {
+private void controlShiftForMinigame(MinecraftClient client, String rawText) {
         String cleanText = rawText.replaceAll("§[0-9a-fk-orA-FK-OR]", "");
 
+        // 1. Tìm vị trí Ngôi sao
         int starIndex = -1;
         String[] starIcons = {"☀️", "☀", "⭐", "★", "☆"};
         for (String icon : starIcons) {
@@ -198,24 +199,32 @@ public class AutoFishMod implements ClientModInitializer {
             }
         }
 
-        int firstBlockIndex = cleanText.indexOf("█");
-        int lastBlockIndex = cleanText.lastIndexOf("█");
+        // 2. Tìm vùng thanh ngang (sử dụng dấu gạch ngang '-' hoặc khối '█')
+        // Dựa vào ảnh, thanh minigame của bạn có dạng: [--------☀️-----------]
+        int firstChar = cleanText.indexOf("-");
+        int lastChar = cleanText.lastIndexOf("-");
 
-        if (starIndex != -1 && firstBlockIndex != -1 && lastBlockIndex != -1) {
-            double targetCenter = (firstBlockIndex + lastBlockIndex) / 2.0;
+        if (starIndex != -1 && firstChar != -1 && lastChar != -1) {
+            double targetCenter = (firstChar + lastChar) / 2.0;
 
-            debugTickCounter++;
-            if (debugTickCounter % 20 == 0 && client.player != null) {
-                client.player.sendMessage(Text.of("§7[Debug] StarIdx: " + starIndex + " | TargetCenter: " + targetCenter), false);
-            }
-
+            // --- LOGIC MỚI: ĐẢO NGƯỢC ---
+            // Nếu ngôi sao nằm BÊN TRÁI tâm thanh -> Giữ Shift để nó trôi sang PHẢI
             if (starIndex < targetCenter) {
                 client.options.sneakKey.setPressed(true);
-            } else {
+            } 
+            // Nếu ngôi sao nằm BÊN PHẢI tâm thanh -> Thả Shift để nó trôi sang TRÁI
+            else {
                 client.options.sneakKey.setPressed(false);
             }
-        } else {
-            client.options.sneakKey.setPressed(false);
+            
+            // Ép buộc Minecraft cập nhật trạng thái phím ngay lập tức
+            client.options.sneakKey.updatePressedStates();
+
+            // Debug
+            debugTickCounter++;
+            if (debugTickCounter % 20 == 0 && client.player != null) {
+                client.player.sendMessage(Text.of("§7[Debug] Star: " + starIndex + " | Target: " + (int)targetCenter), false);
+            }
         }
     }
 
