@@ -2,9 +2,7 @@
   "required": true,
   "package": "com.autofish.mixin",
   "compatibilityLevel": "JAVA_21",
-  "client": [
-    "InGameHudMixin"
-  ],
+  "client": [],
   "injectors": {
     "defaultRequire": 1
   }
