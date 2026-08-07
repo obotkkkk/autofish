@@ -3,11 +3,14 @@ package com.autofish;
 import net.fabricmc.api.ClientModInitializer;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
 import net.fabricmc.fabric.api.client.keybinding.v1.KeyBindingHelper;
+import net.fabricmc.fabric.api.client.message.v1.ClientReceiveMessageEvents;
 import net.minecraft.client.MinecraftClient;
+import net.minecraft.client.gui.screen.ingame.InventoryScreen;
 import net.minecraft.client.option.KeyBinding;
 import net.minecraft.client.util.InputUtil;
 import net.minecraft.screen.slot.SlotActionType;
 import net.minecraft.text.Text;
+import net.minecraft.util.Hand;
 import org.lwjgl.glfw.GLFW;
 
 public class AutoFishMod implements ClientModInitializer {
@@ -21,6 +24,7 @@ public class AutoFishMod implements ClientModInitializer {
         APPLY_BAIT,
         RETURN_BAIT,
         CLOSE_INV,
+        SELECT_ROD_SLOT,
         CAST_ROD,
         WAITING_FOR_FISH,
         PLAYING_MINIGAME
@@ -28,9 +32,8 @@ public class AutoFishMod implements ClientModInitializer {
 
     private static State currentState = State.IDLE;
     private static int stateTimer = 0;
-    private static String latestActionBar = "";
+    private static String latestText = "";
     private static long lastMinigameTextTime = 0;
-    private static boolean debugLogged = false;
 
     @Override
     public void onInitializeClient() {
@@ -40,6 +43,13 @@ public class AutoFishMod implements ClientModInitializer {
                 GLFW.GLFW_KEY_O,
                 "Auto Fish"
         ));
+
+        // Lắng nghe TẤT CẢ tin nhắn từ Server (Actionbar + Chat) bằng Fabric API
+        ClientReceiveMessageEvents.GAME.register((message, overlay) -> {
+            if (message != null) {
+                processIncomingText(message.getString());
+            }
+        });
 
         ClientTickEvents.END_CLIENT_TICK.register(client -> {
             if (toggleKey.wasPressed()) {
@@ -58,9 +68,9 @@ public class AutoFishMod implements ClientModInitializer {
         });
     }
 
-    public static void processActionBarText(String text) {
+    public static void processIncomingText(String text) {
         if (text != null && !text.isEmpty()) {
-            latestActionBar = text;
+            latestText = text;
             lastMinigameTextTime = System.currentTimeMillis();
         }
     }
@@ -73,20 +83,20 @@ public class AutoFishMod implements ClientModInitializer {
 
         switch (currentState) {
             case IDLE:
-                debugLogged = false;
                 currentState = State.OPEN_INV;
-                stateTimer = 5;
+                stateTimer = 10; // Chờ 0.5s chuẩn bị
                 break;
 
             case OPEN_INV:
                 if (client.currentScreen == null) {
-                    client.setScreen(new net.minecraft.client.gui.screen.ingame.InventoryScreen(client.player));
+                    client.setScreen(new InventoryScreen(client.player));
                 }
                 currentState = State.PICK_BAIT;
-                stateTimer = 5;
+                stateTimer = 8; // Đợi GUI tải xong
                 break;
 
             case PICK_BAIT:
+                // Slot 1 Hotbar trong PlayerScreenHandler = 36
                 if (client.player.currentScreenHandler != null) {
                     client.interactionManager.clickSlot(
                             client.player.currentScreenHandler.syncId,
@@ -94,10 +104,11 @@ public class AutoFishMod implements ClientModInitializer {
                     );
                 }
                 currentState = State.APPLY_BAIT;
-                stateTimer = 5;
+                stateTimer = 6;
                 break;
 
             case APPLY_BAIT:
+                // Chuột phải (button 1) vào Slot 2 Hotbar = 37
                 if (client.player.currentScreenHandler != null) {
                     client.interactionManager.clickSlot(
                             client.player.currentScreenHandler.syncId,
@@ -105,10 +116,11 @@ public class AutoFishMod implements ClientModInitializer {
                     );
                 }
                 currentState = State.RETURN_BAIT;
-                stateTimer = 5;
+                stateTimer = 6;
                 break;
 
             case RETURN_BAIT:
+                // Trả mồi về lại Slot 1
                 if (client.player.currentScreenHandler != null) {
                     client.interactionManager.clickSlot(
                             client.player.currentScreenHandler.syncId,
@@ -116,61 +128,64 @@ public class AutoFishMod implements ClientModInitializer {
                     );
                 }
                 currentState = State.CLOSE_INV;
-                stateTimer = 5;
+                stateTimer = 6;
                 break;
 
             case CLOSE_INV:
                 if (client.currentScreen != null) {
                     client.player.closeHandledScreen();
                 }
-                client.player.getInventory().selectedSlot = 1; // Tay chính cầm slot 2
+                currentState = State.SELECT_ROD_SLOT;
+                stateTimer = 8;
+                break;
+
+            case SELECT_ROD_SLOT:
+                // Bắt buộc chuyển sang cầm Slot 2 Hotbar
+                client.player.getInventory().selectedSlot = 1;
                 currentState = State.CAST_ROD;
-                stateTimer = 10;
+                stateTimer = 10; // Chờ client đồng bộ slot tay cầm
                 break;
 
             case CAST_ROD:
-                client.interactionManager.interactItem(client.player, client.player.getActiveHand());
+                // Chuột phải quăng cần (Main Hand)
+                client.interactionManager.interactItem(client.player, Hand.MAIN_HAND);
+                client.player.sendMessage(Text.of("§b[AutoFish] Đã quăng cần! Đang chờ cá..."), false);
                 currentState = State.WAITING_FOR_FISH;
-                stateTimer = 15;
+                stateTimer = 20;
                 break;
 
             case WAITING_FOR_FISH:
                 if (isMinigameActive()) {
-                    if (!debugLogged && client.player != null) {
-                        client.player.sendMessage(Text.of("§a[AutoFish] Phát hiện Minigame! Đang tự động Shift..."), false);
-                        debugLogged = true;
-                    }
+                    client.player.sendMessage(Text.of("§a[AutoFish] Phát hiện Minigame -> Đang Shift!"), false);
                     currentState = State.PLAYING_MINIGAME;
                 }
                 break;
 
             case PLAYING_MINIGAME:
-                // Nếu không thấy thanh minigame cập nhật quá 1.2 giây -> Minigame kết thúc
+                // Nếu minigame kết thúc (quá 1.2s không nhận thêm chữ)
                 if (System.currentTimeMillis() - lastMinigameTextTime > 1200) {
                     releaseShift(client);
+                    client.player.sendMessage(Text.of("§e[AutoFish] Hoàn thành! Lặp lại quy trình..."), false);
                     currentState = State.IDLE;
                     stateTimer = 20;
                     break;
                 }
 
-                controlShiftForMinigame(client, latestActionBar);
+                controlShiftForMinigame(client, latestText);
                 break;
         }
     }
 
     private boolean isMinigameActive() {
         if (System.currentTimeMillis() - lastMinigameTextTime > 1000) return false;
-        
-        // Lọc bỏ toàn bộ mã màu Minecraft §0-§f để kiểm tra text thuần
-        String cleanText = latestActionBar.replaceAll("§[0-9a-fk-orA-FK-OR]", "");
+
+        String cleanText = latestText.replaceAll("§[0-9a-fk-orA-FK-OR]", "");
         return cleanText.contains("█") || cleanText.contains("☀️") || cleanText.contains("☀") || cleanText.contains("%");
     }
 
     private void controlShiftForMinigame(MinecraftClient client, String rawText) {
-        // Xóa mã màu (§a, §f, §l...) giúp tính toán vị trí chỉ số (index) chính xác 100%
         String cleanText = rawText.replaceAll("§[0-9a-fk-orA-FK-OR]", "");
 
-        // Tìm vị trí biểu tượng Ngôi sao / Mặt trời
         int starIndex = -1;
         String[] starIcons = {"☀️", "☀", "⭐", "★", "☆"};
         for (String icon : starIcons) {
@@ -181,24 +196,20 @@ public class AutoFishMod implements ClientModInitializer {
             }
         }
 
-        // Tìm vị trí đầu và cuối của thanh khối ô màu '█'
         int firstBlockIndex = cleanText.indexOf("█");
         int lastBlockIndex = cleanText.lastIndexOf("█");
 
         if (starIndex != -1 && firstBlockIndex != -1 && lastBlockIndex != -1) {
             double targetCenter = (firstBlockIndex + lastBlockIndex) / 2.0;
 
-            // Ngôi sao nằm bên trái vùng mục tiêu -> Nhấn giữ Shift để đẩy sang phải
+            // Ngôi sao nằm bên trái vùng xanh -> Giữ Shift để kéo sang phải
             if (starIndex < targetCenter) {
                 client.options.sneakKey.setPressed(true);
             } 
-            // Ngôi sao nằm bên phải vùng mục tiêu -> Thả Shift để trôi về bên trái
+            // Ngôi sao nằm bên phải vùng xanh -> Thả Shift để trôi về bên trái
             else {
                 client.options.sneakKey.setPressed(false);
             }
-        } else {
-            // Nếu không quét được vị trí, duy trì trạng thái nhấp nhả an toàn
-            client.options.sneakKey.setPressed(false);
         }
     }
 
