@@ -14,7 +14,7 @@ public class KeyBindingMixin {
     private void onIsPressed(CallbackInfoReturnable<Boolean> cir) {
         KeyBinding self = (KeyBinding) (Object) this;
         MinecraftClient client = MinecraftClient.getInstance();
-        
+
         if (client.options != null && self == client.options.sneakKey) {
             if (AutoFishMod.enabled && AutoFishMod.shouldHoldShift) {
                 cir.setReturnValue(true);
