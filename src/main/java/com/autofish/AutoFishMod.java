@@ -186,6 +186,7 @@ public class AutoFishMod implements ClientModInitializer {
     private void controlShiftForMinigame(MinecraftClient client, String rawText) {
         String cleanText = rawText.replaceAll("§[0-9a-fk-orA-FK-OR]", "");
 
+        // 1. Tìm vị trí Ngôi sao
         int starIndex = -1;
         String[] starIcons = {"☀️", "☀", "⭐", "★", "☆"};
         for (String icon : starIcons) {
@@ -195,6 +196,33 @@ public class AutoFishMod implements ClientModInitializer {
                 break;
             }
         }
+
+        // 2. Tìm vùng màu xanh
+        int firstBlockIndex = cleanText.indexOf("█");
+        int lastBlockIndex = cleanText.lastIndexOf("█");
+
+        if (starIndex != -1 && firstBlockIndex != -1 && lastBlockIndex != -1) {
+            double targetCenter = (firstBlockIndex + lastBlockIndex) / 2.0;
+            
+            // LOG DEBUG: Kiểm tra xem mod tính toán vị trí như thế nào
+            // Chỉ gửi tin nhắn mỗi 20 ticks (1s) để không bị spam chat
+            if (System.currentTimeMillis() % 2000 < 50) { 
+                client.player.sendMessage(Text.of("§7[Debug] Star: " + starIndex + " | Target: " + targetCenter), false);
+            }
+
+            // 3. Logic Shift với Tolerance (Deadzone)
+            // tolerance = 0.5 giúp tránh việc phím bị toggle liên tục (rung)
+            double tolerance = 0.5; 
+
+            if (starIndex < targetCenter - tolerance) {
+                // Ngôi sao lệch trái => Phải Shift (Sneak) để đẩy sang phải
+                client.options.sneakKey.setPressed(true);
+            } else if (starIndex > targetCenter + tolerance) {
+                // Ngôi sao lệch phải => Thả Shift để trôi về trái
+                client.options.sneakKey.setPressed(false);
+            }
+        }
+    }
 
         int firstBlockIndex = cleanText.indexOf("█");
         int lastBlockIndex = cleanText.lastIndexOf("█");
