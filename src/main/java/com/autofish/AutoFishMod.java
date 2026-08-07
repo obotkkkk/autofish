@@ -34,6 +34,7 @@ public class AutoFishMod implements ClientModInitializer {
     private static int stateTimer = 0;
     private static String latestText = "";
     private static long lastMinigameTextTime = 0;
+    private static int debugTickCounter = 0;
 
     @Override
     public void onInitializeClient() {
@@ -44,7 +45,6 @@ public class AutoFishMod implements ClientModInitializer {
                 "Auto Fish"
         ));
 
-        // Lắng nghe TẤT CẢ tin nhắn từ Server (Actionbar + Chat) bằng Fabric API
         ClientReceiveMessageEvents.GAME.register((message, overlay) -> {
             if (message != null) {
                 processIncomingText(message.getString());
@@ -70,8 +70,11 @@ public class AutoFishMod implements ClientModInitializer {
 
     public static void processIncomingText(String text) {
         if (text != null && !text.isEmpty()) {
-            latestText = text;
-            lastMinigameTextTime = System.currentTimeMillis();
+            String clean = text.replaceAll("§[0-9a-fk-orA-FK-OR]", "");
+            if (clean.contains("█") || clean.contains("☀️") || clean.contains("☀") || clean.contains("%")) {
+                latestText = text;
+                lastMinigameTextTime = System.currentTimeMillis();
+            }
         }
     }
 
@@ -84,7 +87,7 @@ public class AutoFishMod implements ClientModInitializer {
         switch (currentState) {
             case IDLE:
                 currentState = State.OPEN_INV;
-                stateTimer = 10; // Chờ 0.5s chuẩn bị
+                stateTimer = 10;
                 break;
 
             case OPEN_INV:
@@ -92,11 +95,10 @@ public class AutoFishMod implements ClientModInitializer {
                     client.setScreen(new InventoryScreen(client.player));
                 }
                 currentState = State.PICK_BAIT;
-                stateTimer = 8; // Đợi GUI tải xong
+                stateTimer = 8;
                 break;
 
             case PICK_BAIT:
-                // Slot 1 Hotbar trong PlayerScreenHandler = 36
                 if (client.player.currentScreenHandler != null) {
                     client.interactionManager.clickSlot(
                             client.player.currentScreenHandler.syncId,
@@ -108,7 +110,6 @@ public class AutoFishMod implements ClientModInitializer {
                 break;
 
             case APPLY_BAIT:
-                // Chuột phải (button 1) vào Slot 2 Hotbar = 37
                 if (client.player.currentScreenHandler != null) {
                     client.interactionManager.clickSlot(
                             client.player.currentScreenHandler.syncId,
@@ -120,7 +121,6 @@ public class AutoFishMod implements ClientModInitializer {
                 break;
 
             case RETURN_BAIT:
-                // Trả mồi về lại Slot 1
                 if (client.player.currentScreenHandler != null) {
                     client.interactionManager.clickSlot(
                             client.player.currentScreenHandler.syncId,
@@ -140,32 +140,35 @@ public class AutoFishMod implements ClientModInitializer {
                 break;
 
             case SELECT_ROD_SLOT:
-                // Bắt buộc chuyển sang cầm Slot 2 Hotbar
                 client.player.getInventory().selectedSlot = 1;
                 currentState = State.CAST_ROD;
-                stateTimer = 10; // Chờ client đồng bộ slot tay cầm
+                stateTimer = 10;
                 break;
 
             case CAST_ROD:
-                // Chuột phải quăng cần (Main Hand)
                 client.interactionManager.interactItem(client.player, Hand.MAIN_HAND);
-                client.player.sendMessage(Text.of("§b[AutoFish] Đã quăng cần! Đang chờ cá..."), false);
+                if (client.player != null) {
+                    client.player.sendMessage(Text.of("§b[AutoFish] Đã quăng cần! Đang chờ cá..."), false);
+                }
                 currentState = State.WAITING_FOR_FISH;
-                stateTimer = 20;
+                stateTimer = 15;
                 break;
 
             case WAITING_FOR_FISH:
                 if (isMinigameActive()) {
-                    client.player.sendMessage(Text.of("§a[AutoFish] Phát hiện Minigame -> Đang Shift!"), false);
+                    if (client.player != null) {
+                        client.player.sendMessage(Text.of("§a[AutoFish] Phát hiện Minigame -> Đang tự động Shift!"), false);
+                    }
                     currentState = State.PLAYING_MINIGAME;
                 }
                 break;
 
             case PLAYING_MINIGAME:
-                // Nếu minigame kết thúc (quá 1.2s không nhận thêm chữ)
                 if (System.currentTimeMillis() - lastMinigameTextTime > 1200) {
                     releaseShift(client);
-                    client.player.sendMessage(Text.of("§e[AutoFish] Hoàn thành! Lặp lại quy trình..."), false);
+                    if (client.player != null) {
+                        client.player.sendMessage(Text.of("§e[AutoFish] Hoàn thành! Lặp lại quy trình..."), false);
+                    }
                     currentState = State.IDLE;
                     stateTimer = 20;
                     break;
@@ -178,7 +181,6 @@ public class AutoFishMod implements ClientModInitializer {
 
     private boolean isMinigameActive() {
         if (System.currentTimeMillis() - lastMinigameTextTime > 1000) return false;
-
         String cleanText = latestText.replaceAll("§[0-9a-fk-orA-FK-OR]", "");
         return cleanText.contains("█") || cleanText.contains("☀️") || cleanText.contains("☀") || cleanText.contains("%");
     }
@@ -186,7 +188,6 @@ public class AutoFishMod implements ClientModInitializer {
     private void controlShiftForMinigame(MinecraftClient client, String rawText) {
         String cleanText = rawText.replaceAll("§[0-9a-fk-orA-FK-OR]", "");
 
-        // 1. Tìm vị trí Ngôi sao
         int starIndex = -1;
         String[] starIcons = {"☀️", "☀", "⭐", "★", "☆"};
         for (String icon : starIcons) {
@@ -197,47 +198,24 @@ public class AutoFishMod implements ClientModInitializer {
             }
         }
 
-        // 2. Tìm vùng màu xanh
-        int firstBlockIndex = cleanText.indexOf("█");
-        int lastBlockIndex = cleanText.lastIndexOf("█");
-
-        if (starIndex != -1 && firstBlockIndex != -1 && lastBlockIndex != -1) {
-            double targetCenter = (firstBlockIndex + lastBlockIndex) / 2.0;
-            
-            // LOG DEBUG: Kiểm tra xem mod tính toán vị trí như thế nào
-            // Chỉ gửi tin nhắn mỗi 20 ticks (1s) để không bị spam chat
-            if (System.currentTimeMillis() % 2000 < 50) { 
-                client.player.sendMessage(Text.of("§7[Debug] Star: " + starIndex + " | Target: " + targetCenter), false);
-            }
-
-            // 3. Logic Shift với Tolerance (Deadzone)
-            // tolerance = 0.5 giúp tránh việc phím bị toggle liên tục (rung)
-            double tolerance = 0.5; 
-
-            if (starIndex < targetCenter - tolerance) {
-                // Ngôi sao lệch trái => Phải Shift (Sneak) để đẩy sang phải
-                client.options.sneakKey.setPressed(true);
-            } else if (starIndex > targetCenter + tolerance) {
-                // Ngôi sao lệch phải => Thả Shift để trôi về trái
-                client.options.sneakKey.setPressed(false);
-            }
-        }
-    }
-
         int firstBlockIndex = cleanText.indexOf("█");
         int lastBlockIndex = cleanText.lastIndexOf("█");
 
         if (starIndex != -1 && firstBlockIndex != -1 && lastBlockIndex != -1) {
             double targetCenter = (firstBlockIndex + lastBlockIndex) / 2.0;
 
-            // Ngôi sao nằm bên trái vùng xanh -> Giữ Shift để kéo sang phải
+            debugTickCounter++;
+            if (debugTickCounter % 20 == 0 && client.player != null) {
+                client.player.sendMessage(Text.of("§7[Debug] StarIdx: " + starIndex + " | TargetCenter: " + targetCenter), false);
+            }
+
             if (starIndex < targetCenter) {
                 client.options.sneakKey.setPressed(true);
-            } 
-            // Ngôi sao nằm bên phải vùng xanh -> Thả Shift để trôi về bên trái
-            else {
+            } else {
                 client.options.sneakKey.setPressed(false);
             }
+        } else {
+            client.options.sneakKey.setPressed(false);
         }
     }
 
