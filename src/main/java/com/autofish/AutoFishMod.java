@@ -16,6 +16,7 @@ import org.lwjgl.glfw.GLFW;
 public class AutoFishMod implements ClientModInitializer {
     private static KeyBinding toggleKey;
     public static boolean enabled = false;
+    public static boolean shouldHoldShift = false; // Biến cờ ép Shift cho Mixin
 
     private enum State {
         IDLE,
@@ -86,6 +87,7 @@ public class AutoFishMod implements ClientModInitializer {
 
         switch (currentState) {
             case IDLE:
+                shouldHoldShift = false;
                 currentState = State.OPEN_INV;
                 stateTimer = 10;
                 break;
@@ -157,7 +159,7 @@ public class AutoFishMod implements ClientModInitializer {
             case WAITING_FOR_FISH:
                 if (isMinigameActive()) {
                     if (client.player != null) {
-                        client.player.sendMessage(Text.of("§a[AutoFish] Phát hiện Minigame -> Đang tự động Shift!"), false);
+                        client.player.sendMessage(Text.of("§a[AutoFish] Phát hiện Minigame -> Bắt đầu ép Shift!"), false);
                     }
                     currentState = State.PLAYING_MINIGAME;
                 }
@@ -165,7 +167,7 @@ public class AutoFishMod implements ClientModInitializer {
 
             case PLAYING_MINIGAME:
                 if (System.currentTimeMillis() - lastMinigameTextTime > 1200) {
-                    releaseShift(client);
+                    shouldHoldShift = false;
                     if (client.player != null) {
                         client.player.sendMessage(Text.of("§e[AutoFish] Hoàn thành! Lặp lại quy trình..."), false);
                     }
@@ -185,10 +187,10 @@ public class AutoFishMod implements ClientModInitializer {
         return cleanText.contains("█") || cleanText.contains("☀️") || cleanText.contains("☀") || cleanText.contains("%");
     }
 
-private void controlShiftForMinigame(MinecraftClient client, String rawText) {
+    private void controlShiftForMinigame(MinecraftClient client, String rawText) {
         String cleanText = rawText.replaceAll("§[0-9a-fk-orA-FK-OR]", "");
 
-        // 1. Tìm vị trí Ngôi sao
+        // 1. Tìm Ngôi sao
         int starIndex = -1;
         String[] starIcons = {"☀️", "☀", "⭐", "★", "☆"};
         for (String icon : starIcons) {
@@ -199,44 +201,32 @@ private void controlShiftForMinigame(MinecraftClient client, String rawText) {
             }
         }
 
-        // 2. Tìm vùng thanh ngang (sử dụng dấu gạch ngang '-' hoặc khối '█')
-        // Dựa vào ảnh, thanh minigame của bạn có dạng: [--------☀️-----------]
-        int firstChar = cleanText.indexOf("-");
-        int lastChar = cleanText.lastIndexOf("-");
+        // 2. Tìm vùng ô xanh '█'
+        int firstBlockIndex = cleanText.indexOf("█");
+        int lastBlockIndex = cleanText.lastIndexOf("█");
 
-        if (starIndex != -1 && firstChar != -1 && lastChar != -1) {
-            double targetCenter = (firstChar + lastChar) / 2.0;
+        if (starIndex != -1 && firstBlockIndex != -1 && lastBlockIndex != -1) {
+            double targetCenter = (firstBlockIndex + lastBlockIndex) / 2.0;
 
-            // --- LOGIC MỚI: ĐẢO NGƯỢC ---
-            // Nếu ngôi sao nằm BÊN TRÁI tâm thanh -> Giữ Shift để nó trôi sang PHẢI
-            if (starIndex < targetCenter) {
-                client.options.sneakKey.setPressed(true);
-            } 
-            // Nếu ngôi sao nằm BÊN PHẢI tâm thanh -> Thả Shift để nó trôi sang TRÁI
-            else {
-                client.options.sneakKey.setPressed(false);
-            }
-            
-            // Ép buộc Minecraft cập nhật trạng thái phím ngay lập tức
-            client.options.sneakKey.updatePressedStates();
-
-            // Debug
             debugTickCounter++;
             if (debugTickCounter % 20 == 0 && client.player != null) {
-                client.player.sendMessage(Text.of("§7[Debug] Star: " + starIndex + " | Target: " + (int)targetCenter), false);
+                client.player.sendMessage(Text.of("§7[Debug] StarIdx: " + starIndex + " | TargetCenter: " + targetCenter + " | Shifting: " + shouldHoldShift), false);
             }
-        }
-    }
 
-    private void releaseShift(MinecraftClient client) {
-        if (client.options != null && client.options.sneakKey != null) {
-            client.options.sneakKey.setPressed(false);
+            // Ngôi sao bên trái ô xanh -> Ép giữ Shift để nó chạy sang phải
+            if (starIndex < targetCenter) {
+                shouldHoldShift = true;
+            } else {
+                shouldHoldShift = false;
+            }
+        } else {
+            shouldHoldShift = false;
         }
     }
 
     private void resetState(MinecraftClient client) {
         currentState = State.IDLE;
         stateTimer = 0;
-        releaseShift(client);
+        shouldHoldShift = false;
     }
 }

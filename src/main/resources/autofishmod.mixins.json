@@ -2,7 +2,9 @@
   "required": true,
   "package": "com.autofish.mixin",
   "compatibilityLevel": "JAVA_21",
-  "client": [],
+  "client": [
+    "KeyBindingMixin"
+  ],
   "injectors": {
     "defaultRequire": 1
   }
