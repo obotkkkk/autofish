@@ -6,7 +6,6 @@ import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
 import net.fabricmc.fabric.api.client.keybinding.v1.KeyBindingHelper;
 import net.fabricmc.fabric.api.client.message.v1.ClientReceiveMessageEvents;
 import net.minecraft.client.MinecraftClient;
-import net.minecraft.client.gui.screen.ingame.InventoryScreen;
 import net.minecraft.client.option.KeyBinding;
 import net.minecraft.client.util.InputUtil;
 import net.minecraft.screen.slot.SlotActionType;
@@ -36,6 +35,13 @@ public class AutoFishMod implements ClientModInitializer {
     private static String latestActionHud = "";
     private static String lastLoggedHud = null;
     private static long lastBarTime = 0;
+    // Minecraft keeps rendering the last action-bar Text object client-side
+    // for a few seconds even after the server stops sending updates. Without
+    // tracking object identity, re-reading that same lingering text every
+    // tick made a stale 99-100% reading from the PREVIOUS catch look like
+    // fresh data for the NEXT episode, causing an instant fake catch the
+    // moment FISHING started. We only process genuinely new packets now.
+    private static Text lastProcessedOverlayText = null;
 
     private static long lastActiveFishingTime = 0;
     private static long fishingStartTime = 0;
@@ -91,6 +97,13 @@ public class AutoFishMod implements ClientModInitializer {
             "ban can gan moi"
     };
     private static final Pattern DIACRITICS = Pattern.compile("\\p{M}");
+    // If a bait-trigger message fires again this soon after we already
+    // finished a rebait cycle, the rebait clearly didn't add any bait (there
+    // was none left to move) -- rather than looping the same failing click
+    // sequence forever, we stop the bot and tell the player to restock.
+    private static long lastBaitCycleCompletedAt = -1;
+    private static final long BAIT_FAILURE_WINDOW_MS = 10000;
+    private static boolean justRebaited = false;
 
     // The server renders chat text in a "small caps" stylized font. These are
     // NOT accented Latin letters (which Normalizer/diacritic-stripping would
@@ -180,9 +193,16 @@ public class AutoFishMod implements ClientModInitializer {
 
         if (isBaitTrigger) {
             DebugLogger.log("Chat matched bait-trigger phrase. raw='" + text + "' state=" + currentState);
+
+            MinecraftClient client = MinecraftClient.getInstance();
+            if (lastBaitCycleCompletedAt != -1 && System.currentTimeMillis() - lastBaitCycleCompletedAt < BAIT_FAILURE_WINDOW_MS) {
+                DebugLogger.log("Bait trigger fired again right after a completed rebait cycle -- treating as truly out of bait, stopping bot.");
+                stopDueToOutOfBait(client);
+                return;
+            }
+
             if (currentState != State.BAITING && currentState != State.PICK_BAIT
                     && currentState != State.APPLY_BAIT && currentState != State.RETURN_BAIT) {
-                MinecraftClient client = MinecraftClient.getInstance();
                 // If we were mid-cast/reeling, let go of the rod first so opening
                 // the inventory doesn't leave a stuck bobber.
                 if (currentState == State.FISHING || currentState == State.WAITING_BITE) {
@@ -194,6 +214,16 @@ public class AutoFishMod implements ClientModInitializer {
                 DebugLogger.log("Bait trigger ignored, already in a baiting state.");
             }
         }
+    }
+
+    private void stopDueToOutOfBait(MinecraftClient client) {
+        enabled = false;
+        resetState(client);
+        lastBaitCycleCompletedAt = -1;
+        if (client.player != null) {
+            client.player.sendMessage(Text.of("§c[AutoFish] Hết mồi thật rồi! Đã TẮT bot, bạn bổ sung mồi rồi bật lại nhé."), false);
+        }
+        DebugLogger.log("Bot auto-stopped: out of bait.");
     }
 
     private void parseActionHud(String rawText) {
@@ -236,7 +266,8 @@ public class AutoFishMod implements ClientModInitializer {
 
         if (client.inGameHud != null) {
             Text overlayText = ((InGameHudAccessor) client.inGameHud).getOverlayMessage();
-            if (overlayText != null) {
+            if (overlayText != null && overlayText != lastProcessedOverlayText) {
+                lastProcessedOverlayText = overlayText;
                 parseActionHud(overlayText.getString());
             }
         }
@@ -270,48 +301,55 @@ public class AutoFishMod implements ClientModInitializer {
             case PREPARE:
                 setShift(client, false);
                 selectFishingRod(client);
+                if (!(client.player.getInventory().getStack(1).getItem() instanceof net.minecraft.item.FishingRodItem)) {
+                    // Slot 1 (the rod slot we always select) no longer holds a
+                    // fishing rod -- it likely broke or was moved/consumed.
+                    // Continuing would just click/cast with an empty hand
+                    // forever, so stop and tell the player instead.
+                    client.player.sendMessage(Text.of("§c[AutoFish] Không thấy cần câu ở ô hotbar 2! Có thể cần đã gãy. Đã TẮT bot."), false);
+                    DebugLogger.log("PREPARE: no fishing rod found in hotbar slot 1, stopping.");
+                    enabled = false;
+                    resetState(client);
+                    break;
+                }
                 currentState = State.CASTING;
                 stateTimer = 10;
                 break;
 
             case BAITING:
                 setShift(client, false);
-                if (client.currentScreen == null) {
-                    client.setScreen(new InventoryScreen(client.player));
-                }
+                // No screen is opened here on purpose: client.player.playerScreenHandler
+                // (syncId 0) is always present regardless of what's shown on
+                // screen, so we can send the exact same click packets the
+                // server expects without ever displaying the inventory GUI.
+                // This lets the player freely open the pause menu, chat, etc.
+                // while the bot rebaits silently in the background.
                 currentState = State.PICK_BAIT;
                 stateTimer = 10;
                 break;
 
             case PICK_BAIT:
-                if (client.player.currentScreenHandler != null) {
-                    DebugLogger.log("PICK_BAIT screenHandler=" + client.player.currentScreenHandler.getClass().getSimpleName());
-                    client.interactionManager.clickSlot(client.player.currentScreenHandler.syncId, 36, 0, SlotActionType.PICKUP, client.player);
-                }
+                client.interactionManager.clickSlot(client.player.playerScreenHandler.syncId, 36, 0, SlotActionType.PICKUP, client.player);
                 currentState = State.APPLY_BAIT;
                 stateTimer = 8;
                 break;
 
             case APPLY_BAIT:
-                if (client.player.currentScreenHandler != null) {
-                    client.interactionManager.clickSlot(client.player.currentScreenHandler.syncId, 37, 1, SlotActionType.PICKUP, client.player);
-                }
+                client.interactionManager.clickSlot(client.player.playerScreenHandler.syncId, 37, 1, SlotActionType.PICKUP, client.player);
                 currentState = State.RETURN_BAIT;
                 stateTimer = 8;
                 break;
 
             case RETURN_BAIT:
-                if (client.player.currentScreenHandler != null) {
-                    client.interactionManager.clickSlot(client.player.currentScreenHandler.syncId, 36, 0, SlotActionType.PICKUP, client.player);
-                }
+                client.interactionManager.clickSlot(client.player.playerScreenHandler.syncId, 36, 0, SlotActionType.PICKUP, client.player);
                 currentState = State.CLOSE_INV;
                 stateTimer = 8;
                 break;
 
             case CLOSE_INV:
-                if (client.currentScreen != null) {
-                    client.player.closeHandledScreen();
-                }
+                // Nothing to close -- we never opened a screen. Just mark
+                // that a rebait cycle just completed and move on to casting.
+                justRebaited = true;
                 selectFishingRod(client);
                 currentState = State.CASTING;
                 stateTimer = 15;
@@ -331,6 +369,10 @@ public class AutoFishMod implements ClientModInitializer {
                 // the same millisecond as "WAITING_BITE -> FISHING".
                 latestActionHud = "";
                 lastLoggedHud = null;
+                if (justRebaited) {
+                    lastBaitCycleCompletedAt = now;
+                    justRebaited = false;
+                }
                 break;
 
             case WAITING_BITE:
@@ -349,6 +391,10 @@ public class AutoFishMod implements ClientModInitializer {
                     fishingStartTime = now;
                     lastDotX = Integer.MIN_VALUE;
                     stallTicks = 0;
+                    // A real bite happening confirms the rod had bait -- clear
+                    // the failure-tracking window so an unrelated bait-trigger
+                    // message far later doesn't get misread as a repeat failure.
+                    lastBaitCycleCompletedAt = -1;
                 }
                 break;
 
