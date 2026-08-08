@@ -301,13 +301,12 @@ public class AutoFishMod implements ClientModInitializer {
             case PREPARE:
                 setShift(client, false);
                 selectFishingRod(client);
-                if (!(client.player.getInventory().getStack(1).getItem() instanceof net.minecraft.item.FishingRodItem)) {
-                    // Slot 1 (the rod slot we always select) no longer holds a
-                    // fishing rod -- it likely broke or was moved/consumed.
-                    // Continuing would just click/cast with an empty hand
-                    // forever, so stop and tell the player instead.
-                    client.player.sendMessage(Text.of("§c[AutoFish] Không thấy cần câu ở ô hotbar 2! Có thể cần đã gãy. Đã TẮT bot."), false);
-                    DebugLogger.log("PREPARE: no fishing rod found in hotbar slot 1, stopping.");
+                if (!(client.player.getInventory().getStack(client.player.getInventory().selectedSlot).getItem() instanceof net.minecraft.item.FishingRodItem)) {
+                    // selectFishingRod() searched the whole hotbar and still
+                    // couldn't find a rod anywhere -- it's genuinely gone
+                    // (broken/dropped/moved out of the hotbar entirely).
+                    client.player.sendMessage(Text.of("§c[AutoFish] Không tìm thấy cần câu trong hotbar! Có thể cần đã gãy. Đã TẮT bot."), false);
+                    DebugLogger.log("PREPARE: no fishing rod found anywhere in hotbar, stopping.");
                     enabled = false;
                     resetState(client);
                     break;
@@ -347,8 +346,12 @@ public class AutoFishMod implements ClientModInitializer {
                 break;
 
             case CLOSE_INV:
-                // Nothing to close -- we never opened a screen. Just mark
-                // that a rebait cycle just completed and move on to casting.
+                // Nothing to close -- we never opened a screen. As a safety
+                // net, make sure the click sequence didn't leave an item
+                // stranded on the cursor (with no GUI visible, the player
+                // can't see or fix this themselves) -- deposit it into the
+                // first empty inventory slot if so.
+                ensureCursorEmpty(client);
                 justRebaited = true;
                 selectFishingRod(client);
                 currentState = State.CASTING;
@@ -554,10 +557,53 @@ public class AutoFishMod implements ClientModInitializer {
         // from sneakKey's pressed state each tick, so setPressed() above is sufficient.
     }
 
-    private void selectFishingRod(MinecraftClient client) {
-        if (client.player != null) {
-            client.player.getInventory().selectedSlot = 1;
+    /**
+     * Finds and selects whichever hotbar slot currently holds the fishing
+     * rod, instead of assuming a fixed index. The bait-application click
+     * sequence (PICK_BAIT/APPLY_BAIT/RETURN_BAIT) can end up shuffling items
+     * between hotbar slots depending on exactly how the server's custom bait
+     * GUI logic handles each click -- confirmed in logs where the rod
+     * disappeared from the assumed slot 1 right after a single rebait cycle.
+     * Searching dynamically means the bot keeps finding the rod wherever it
+     * actually lands instead of "losing" it.
+     */
+    /**
+     * Safety net for the no-GUI bait-click sequence: if an item ends up stuck
+     * on the cursor (e.g. a click swapped two different items instead of
+     * merging/placing as expected), the player has no visible inventory to
+     * fix it themselves. Find the first empty slot and deposit it there.
+     */
+    private void ensureCursorEmpty(MinecraftClient client) {
+        if (client.player == null || client.player.playerScreenHandler == null) return;
+        net.minecraft.item.ItemStack cursor = client.player.playerScreenHandler.getCursorStack();
+        if (cursor == null || cursor.isEmpty()) return;
+
+        DebugLogger.log("Cursor not empty after bait sequence (" + cursor + "), depositing into first empty slot.");
+        net.minecraft.entity.player.PlayerInventory inv = client.player.getInventory();
+        // Network slot indices: 9-35 = main inventory (maps 1:1 to
+        // PlayerInventory indices 9-35), 36-44 = hotbar (maps to
+        // PlayerInventory indices 0-8).
+        for (int networkSlot = 9; networkSlot <= 44; networkSlot++) {
+            int invIndex = networkSlot <= 35 ? networkSlot : networkSlot - 36;
+            net.minecraft.item.ItemStack stack = inv.getStack(invIndex);
+            if (stack.isEmpty()) {
+                client.interactionManager.clickSlot(client.player.playerScreenHandler.syncId, networkSlot, 0, SlotActionType.PICKUP, client.player);
+                return;
+            }
         }
+    }
+        if (client.player == null) return;
+        net.minecraft.entity.player.PlayerInventory inv = client.player.getInventory();
+        for (int i = 0; i < 9; i++) {
+            if (inv.getStack(i).getItem() instanceof net.minecraft.item.FishingRodItem) {
+                inv.selectedSlot = i;
+                return;
+            }
+        }
+        // Not found anywhere in the hotbar -- fall back to the historical
+        // default slot; the PREPARE state's rod-presence check will catch
+        // and report a truly missing rod right after this.
+        inv.selectedSlot = 1;
     }
 
     private void releaseRod(MinecraftClient client) {
