@@ -1,5 +1,6 @@
 package com.autofish;
 
+import com.autofish.mixin.InGameHudAccessor;
 import net.fabricmc.api.ClientModInitializer;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
 import net.fabricmc.fabric.api.client.keybinding.v1.KeyBindingHelper;
@@ -8,7 +9,6 @@ import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.gui.screen.ingame.InventoryScreen;
 import net.minecraft.client.option.KeyBinding;
 import net.minecraft.client.util.InputUtil;
-import net.minecraft.item.Items;
 import net.minecraft.screen.slot.SlotActionType;
 import net.minecraft.text.Text;
 import net.minecraft.util.Hand;
@@ -19,7 +19,6 @@ public class AutoFishMod implements ClientModInitializer {
     public static boolean enabled = false;
     public static boolean shouldHoldShift = false;
 
-    // Trạng thái hoạt động
     public enum State {
         IDLE, PREPARE, BAITING, PICK_BAIT, APPLY_BAIT, RETURN_BAIT, CLOSE_INV, CASTING, WAITING_BITE, FISHING, HARD_RESET_WAIT
     }
@@ -27,16 +26,14 @@ public class AutoFishMod implements ClientModInitializer {
     private static State currentState = State.IDLE;
     private static int stateTimer = 0;
     
-    // Dữ liệu Minigame & PID
     private static final PIDController pid = new PIDController(0.8, 0.0, 0.2);
     private static String latestActionHud = "";
     private static long lastBarTime = 0;
 
-    // Thời gian an toàn & Timeout
     private static long lastActiveFishingTime = 0;
     private static long lastHardResetTime = 0;
-    private static final long MAX_IDLE_TIMEOUT_MS = 60000; // 60 giây kẹt
-    private static final long HARD_RESET_INTERVAL_MS = 1800000; // 30 phút reset
+    private static final long MAX_IDLE_TIMEOUT_MS = 60000;
+    private static final long HARD_RESET_INTERVAL_MS = 1800000;
 
     @Override
     public void onInitializeClient() {
@@ -44,15 +41,9 @@ public class AutoFishMod implements ClientModInitializer {
                 "Bật/Tắt Auto Fish", InputUtil.Type.KEYSYM, GLFW.GLFW_KEY_O, "Auto Fish"
         ));
 
-        // Lắng nghe cả Chat lẫn Actionbar từ Server
         ClientReceiveMessageEvents.GAME.register((message, overlay) -> {
-            if (message != null) {
-                String text = message.getString();
-                if (overlay) {
-                    parseActionHud(text);
-                } else {
-                    onChatMessage(text);
-                }
+            if (message != null && !overlay) {
+                onChatMessage(message.getString());
             }
         });
 
@@ -79,7 +70,6 @@ public class AutoFishMod implements ClientModInitializer {
 
     private void onChatMessage(String text) {
         String clean = text.toLowerCase();
-        // Kiểm tra thông báo hết mồi từ server
         if (clean.contains("cần phải gắn mồi") || clean.contains("can phai gan moi")) {
             if (currentState != State.BAITING && currentState != State.PICK_BAIT) {
                 currentState = State.BAITING;
@@ -89,6 +79,7 @@ public class AutoFishMod implements ClientModInitializer {
     }
 
     private void parseActionHud(String rawText) {
+        if (rawText == null) return;
         String clean = rawText.replaceAll("§[0-9a-fk-orA-FK-OR]", "");
         if (clean.contains("█") || clean.contains("☀️") || clean.contains("☀") || clean.contains("%") || clean.contains("[")) {
             latestActionHud = clean;
@@ -100,12 +91,18 @@ public class AutoFishMod implements ClientModInitializer {
     private void handleTick(MinecraftClient client) {
         long now = System.currentTimeMillis();
 
-        // 1. Kiểm tra Hard Reset mỗi 30 phút
+        if (client.inGameHud != null) {
+            Text overlayText = ((InGameHudAccessor) client.inGameHud).getOverlayMessage();
+            if (overlayText != null) {
+                parseActionHud(overlayText.getString());
+            }
+        }
+
         if (now - lastHardResetTime > HARD_RESET_INTERVAL_MS && currentState != State.HARD_RESET_WAIT) {
             client.player.sendMessage(Text.of("§d[AutoFish] Hoạt động 30 phút, tạm nghỉ 10s an toàn..."), false);
             releaseRod(client);
             currentState = State.HARD_RESET_WAIT;
-            stateTimer = 200; // 10 giây
+            stateTimer = 200;
             lastHardResetTime = now;
             return;
         }
@@ -122,12 +119,14 @@ public class AutoFishMod implements ClientModInitializer {
                 break;
 
             case PREPARE:
+                setShift(client, false);
                 selectFishingRod(client);
                 currentState = State.CASTING;
                 stateTimer = 10;
                 break;
 
             case BAITING:
+                setShift(client, false);
                 if (client.currentScreen == null) {
                     client.setScreen(new InventoryScreen(client.player));
                 }
@@ -137,7 +136,6 @@ public class AutoFishMod implements ClientModInitializer {
 
             case PICK_BAIT:
                 if (client.player.currentScreenHandler != null) {
-                    // Cầm mồi ở Slot 1 (36)
                     client.interactionManager.clickSlot(client.player.currentScreenHandler.syncId, 36, 0, SlotActionType.PICKUP, client.player);
                 }
                 currentState = State.APPLY_BAIT;
@@ -146,7 +144,6 @@ public class AutoFishMod implements ClientModInitializer {
 
             case APPLY_BAIT:
                 if (client.player.currentScreenHandler != null) {
-                    // Chuột phải đè lên cần ở Slot 2 (37)
                     client.interactionManager.clickSlot(client.player.currentScreenHandler.syncId, 37, 1, SlotActionType.PICKUP, client.player);
                 }
                 currentState = State.RETURN_BAIT;
@@ -155,7 +152,6 @@ public class AutoFishMod implements ClientModInitializer {
 
             case RETURN_BAIT:
                 if (client.player.currentScreenHandler != null) {
-                    // Đặt lượng mồi dư về lại Slot 1 (36)
                     client.interactionManager.clickSlot(client.player.currentScreenHandler.syncId, 36, 0, SlotActionType.PICKUP, client.player);
                 }
                 currentState = State.CLOSE_INV;
@@ -179,7 +175,7 @@ public class AutoFishMod implements ClientModInitializer {
                 break;
 
             case WAITING_BITE:
-                // Nếu quá 60s không thấy minigame -> Quăng lại cần (Chống kẹt)
+                setShift(client, false);
                 if (now - lastActiveFishingTime > MAX_IDLE_TIMEOUT_MS) {
                     client.player.sendMessage(Text.of("§c[AutoFish] Phát hiện kẹt quá 60s! Quăng lại..."), false);
                     releaseRod(client);
@@ -195,19 +191,19 @@ public class AutoFishMod implements ClientModInitializer {
 
             case FISHING:
                 if (now - lastBarTime > 1200) {
-                    shouldHoldShift = false;
+                    setShift(client, false);
                     pid.reset();
                     currentState = State.PREPARE;
-                    stateTimer = 30; // Chờ 1.5s trước khi lặp lại
+                    stateTimer = 30;
                     break;
                 }
 
-                handlePIDMovement();
+                handlePIDMovement(client);
                 break;
         }
     }
 
-    private void handlePIDMovement() {
+    private void handlePIDMovement(MinecraftClient client) {
         int dotX = -1;
         for (String icon : new String[]{"☀️", "☀", "⭐", "★", "☆"}) {
             int idx = latestActionHud.indexOf(icon);
@@ -222,20 +218,28 @@ public class AutoFishMod implements ClientModInitializer {
 
         if (dotX != -1 && firstBlock != -1 && lastBlock != -1) {
             double barX = (firstBlock + lastBlock) / 2.0;
-            
-            // Tính toán lực điều khiển từ bộ PID
             double pwr = pid.calculate(barX, dotX);
 
-            // Nếu Ngôi sao lệch trái so với tâm ô xanh -> Ép Shift
-            shouldHoldShift = (pwr > 0);
+            boolean hold = (pwr > 0);
+            setShift(client, hold);
         } else {
-            shouldHoldShift = false;
+            setShift(client, false);
+        }
+    }
+
+    private void setShift(MinecraftClient client, boolean hold) {
+        shouldHoldShift = hold;
+        if (client.options != null && client.options.sneakKey != null) {
+            client.options.sneakKey.setPressed(hold);
+        }
+        if (client.player != null && client.player.input != null) {
+            client.player.input.sneaking = hold;
         }
     }
 
     private void selectFishingRod(MinecraftClient client) {
         if (client.player != null) {
-            client.player.getInventory().selectedSlot = 1; // Slot 2 Hotbar
+            client.player.getInventory().selectedSlot = 1;
         }
     }
 
@@ -248,7 +252,7 @@ public class AutoFishMod implements ClientModInitializer {
     private void resetState(MinecraftClient client) {
         currentState = State.IDLE;
         stateTimer = 0;
-        shouldHoldShift = false;
+        setShift(client, false);
         pid.reset();
         if (client.currentScreen != null && client.player != null) {
             client.player.closeHandledScreen();

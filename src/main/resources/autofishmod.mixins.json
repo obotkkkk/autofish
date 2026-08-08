@@ -3,6 +3,7 @@
   "package": "com.autofish.mixin",
   "compatibilityLevel": "JAVA_21",
   "client": [
+    "InGameHudAccessor",
     "KeyBindingMixin"
   ],
   "injectors": {
