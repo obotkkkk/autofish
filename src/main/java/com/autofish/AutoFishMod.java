@@ -49,7 +49,7 @@ public class AutoFishMod implements ClientModInitializer {
     // bar, since the white target cells can appear as multiple separate
     // clusters (not one contiguous block).
     private static final char TARGET_CELL_CHAR = '█';
-    private static final String[] STAR_ICONS = {"☀️", "☀", "⭐", "★", "☆"};
+    private static final String[] STAR_ICONS = {"🌟", "☀️", "☀", "⭐", "★", "☆"};
     // Hysteresis band (in character-cells) around the target: while the star
     // is within this band we keep the previous shift state instead of
     // flip-flopping every tick, which is what a raw PID with a noisy index
@@ -72,13 +72,33 @@ public class AutoFishMod implements ClientModInitializer {
     };
     private static final Pattern DIACRITICS = Pattern.compile("\\p{M}");
 
+    // The server renders chat text in a "small caps" stylized font. These are
+    // NOT accented Latin letters (which Normalizer/diacritic-stripping would
+    // handle) — they are distinct Unicode codepoints from the Phonetic
+    // Extensions block (e.g. 'ᴄ' U+1D04 is a different character from 'c' or
+    // 'C'). We map them back to plain lowercase ASCII before matching.
+    private static final String SMALL_CAPS_SRC =
+            "ᴀʙᴄᴅᴇꜰɢʜɪᴊᴋʟᴍɴᴏᴘꞯʀꜱᴛᴜᴠᴡxʏᴢ";
+    private static final String SMALL_CAPS_DST =
+            "abcdefghijklmnopqrstuvwxyz";
+
+    private static String smallCapsToAscii(String input) {
+        StringBuilder sb = new StringBuilder(input.length());
+        for (int i = 0; i < input.length(); i++) {
+            char c = input.charAt(i);
+            int idx = SMALL_CAPS_SRC.indexOf(c);
+            sb.append(idx != -1 ? SMALL_CAPS_DST.charAt(idx) : c);
+        }
+        return sb.toString();
+    }
+
     @Override
     public void onInitializeClient() {
         toggleKey = KeyBindingHelper.registerKeyBinding(new KeyBinding(
                 "Bật/Tắt Auto Fish", InputUtil.Type.KEYSYM, GLFW.GLFW_KEY_O, "Auto Fish"
         ));
         debugKey = KeyBindingHelper.registerKeyBinding(new KeyBinding(
-                "Bật/Tắt Debug Log", InputUtil.Type.KEYSYM, GLFW.GLFW_KEY_L, "Auto Fish"
+                "Bật/Tắt Debug Log", InputUtil.Type.KEYSYM, GLFW.GLFW_KEY_I, "Auto Fish"
         ));
 
         ClientReceiveMessageEvents.GAME.register((message, overlay) -> {
@@ -122,7 +142,8 @@ public class AutoFishMod implements ClientModInitializer {
 
     /** Strip Vietnamese diacritics and lowercase, for robust fuzzy matching of server chat text. */
     private static String normalize(String input) {
-        String decomposed = Normalizer.normalize(input.toLowerCase(), Normalizer.Form.NFD);
+        String asciiCaps = smallCapsToAscii(input.toLowerCase());
+        String decomposed = Normalizer.normalize(asciiCaps, Normalizer.Form.NFD);
         String noDiacritics = DIACRITICS.matcher(decomposed).replaceAll("");
         return noDiacritics.replace('đ', 'd');
     }
