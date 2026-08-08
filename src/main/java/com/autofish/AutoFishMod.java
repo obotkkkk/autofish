@@ -64,6 +64,17 @@ public class AutoFishMod implements ClientModInitializer {
     // flip-flopping every tick, which is what a raw PID with a noisy index
     // signal tends to do.
     private static final double HYSTERESIS = 1.0;
+    private static final Pattern PERCENT_PATTERN = Pattern.compile("(\\d{1,3})%");
+    // Edge-stall anti-freeze: if the star's index doesn't move for this many
+    // consecutive ticks while we're actively correcting a real error, we
+    // assume it's pinned against the bar's edge (can't render further) and
+    // invert the held direction to break free. Confirmed via debug logs: the
+    // star froze at the right wall for 3+ seconds straight while % steadily
+    // dropped, because holding shift kept pushing it further right with no
+    // visible effect instead of correcting back toward the target.
+    private static int lastDotX = Integer.MIN_VALUE;
+    private static int stallTicks = 0;
+    private static final int STALL_TICKS_THRESHOLD = 6;
 
     // --- Bait detection ---
     // Server messages may render with slightly different accents/spacing than
@@ -327,6 +338,8 @@ public class AutoFishMod implements ClientModInitializer {
                 if (now - lastBarTime < 1000) {
                     currentState = State.FISHING;
                     fishingStartTime = now;
+                    lastDotX = Integer.MIN_VALUE;
+                    stallTicks = 0;
                 }
                 break;
 
@@ -350,9 +363,38 @@ public class AutoFishMod implements ClientModInitializer {
                     break;
                 }
 
+                // Reaching 100% does NOT make the bar disappear by itself on
+                // this server -- confirmed by debug logs showing the bot
+                // stuck holding shift at 100% for 15+ seconds with no
+                // progress. We must actively right-click to reel the catch
+                // in once the bar is effectively full.
+                int percent = parsePercent(latestActionHud);
+                if (percent >= 99) {
+                    DebugLogger.log("FISHING reached " + percent + "%, reeling in.");
+                    setShift(client, false);
+                    releaseRod(client);
+                    currentState = State.PREPARE;
+                    stateTimer = 30;
+                    break;
+                }
+
                 handleFishingBarControl(client);
                 break;
         }
+    }
+
+    /** Extracts the trailing "NN%" percentage from the fishing bar HUD text, or -1 if not found. */
+    private static int parsePercent(String hud) {
+        if (hud == null) return -1;
+        java.util.regex.Matcher m = PERCENT_PATTERN.matcher(hud);
+        int last = -1;
+        while (m.find()) {
+            try {
+                last = Integer.parseInt(m.group(1));
+            } catch (NumberFormatException ignored) {
+            }
+        }
+        return last;
     }
 
     /**
@@ -410,11 +452,32 @@ public class AutoFishMod implements ClientModInitializer {
             hold = shouldHoldShift; // inside the deadband: keep previous state, avoid flicker
         }
 
+        // Edge-stall detection: if the star's index hasn't moved for a
+        // stretch of ticks while we're actively holding/releasing to correct
+        // a real (non-deadband) error, the star is very likely pinned against
+        // the left/right edge of the bar and our steady command isn't doing
+        // anything. Briefly invert direction to try to pull it back off the
+        // edge so it has room to travel toward the target again.
+        if (dotX == lastDotX && Math.abs(error) > HYSTERESIS) {
+            stallTicks++;
+        } else {
+            stallTicks = 0;
+        }
+        lastDotX = dotX;
+
+        boolean kicked = false;
+        if (stallTicks > STALL_TICKS_THRESHOLD) {
+            hold = !hold;
+            kicked = true;
+            stallTicks = 0;
+        }
+
         setShift(client, hold);
 
         DebugLogger.log("FISHING icon=" + matchedIcon + " dotX=" + dotX
                 + " nearestTarget=" + nearest + " targetCells=" + targetCells.size()
-                + " error=" + error + " hold=" + hold + " hud='" + latestActionHud + "'");
+                + " error=" + error + " hold=" + hold + (kicked ? " KICK(edge-stall)" : "")
+                + " hud='" + latestActionHud + "'");
     }
 
     private void setShift(MinecraftClient client, boolean hold) {
