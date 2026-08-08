@@ -14,8 +14,14 @@ import net.minecraft.text.Text;
 import net.minecraft.util.Hand;
 import org.lwjgl.glfw.GLFW;
 
+import java.text.Normalizer;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.regex.Pattern;
+
 public class AutoFishMod implements ClientModInitializer {
     private static KeyBinding toggleKey;
+    private static KeyBinding debugKey;
     public static boolean enabled = false;
     public static boolean shouldHoldShift = false;
 
@@ -24,10 +30,11 @@ public class AutoFishMod implements ClientModInitializer {
     }
 
     private static State currentState = State.IDLE;
+    private static State lastLoggedState = null;
     private static int stateTimer = 0;
-    
-    private static final PIDController pid = new PIDController(0.8, 0.0, 0.2);
+
     private static String latestActionHud = "";
+    private static String lastLoggedHud = null;
     private static long lastBarTime = 0;
 
     private static long lastActiveFishingTime = 0;
@@ -35,10 +42,43 @@ public class AutoFishMod implements ClientModInitializer {
     private static final long MAX_IDLE_TIMEOUT_MS = 60000;
     private static final long HARD_RESET_INTERVAL_MS = 1800000;
 
+    // --- Fishing minigame control tuning ---
+    // The minigame is a two-state (bang-bang) control: holding sneak moves the
+    // star icon right, releasing it moves the star left. We steer the star
+    // toward the NEAREST "target" cell rather than the midpoint of the whole
+    // bar, since the white target cells can appear as multiple separate
+    // clusters (not one contiguous block).
+    private static final char TARGET_CELL_CHAR = '█';
+    private static final String[] STAR_ICONS = {"☀️", "☀", "⭐", "★", "☆"};
+    // Hysteresis band (in character-cells) around the target: while the star
+    // is within this band we keep the previous shift state instead of
+    // flip-flopping every tick, which is what a raw PID with a noisy index
+    // signal tends to do.
+    private static final double HYSTERESIS = 1.0;
+
+    // --- Bait detection ---
+    // Server messages may render with slightly different accents/spacing than
+    // expected, so we strip Vietnamese diacritics before matching and check
+    // several known phrasings instead of a single exact string.
+    private static final String[] BAIT_TRIGGER_PHRASES = {
+            "can phai gan moi",
+            "gan moi vao can cau",
+            "het moi",
+            "khong con moi",
+            "khong co moi",
+            "vui long gan moi",
+            "moi da het",
+            "ban can gan moi"
+    };
+    private static final Pattern DIACRITICS = Pattern.compile("\\p{M}");
+
     @Override
     public void onInitializeClient() {
         toggleKey = KeyBindingHelper.registerKeyBinding(new KeyBinding(
                 "Bật/Tắt Auto Fish", InputUtil.Type.KEYSYM, GLFW.GLFW_KEY_O, "Auto Fish"
+        ));
+        debugKey = KeyBindingHelper.registerKeyBinding(new KeyBinding(
+                "Bật/Tắt Debug Log", InputUtil.Type.KEYSYM, GLFW.GLFW_KEY_L, "Auto Fish"
         ));
 
         ClientReceiveMessageEvents.GAME.register((message, overlay) -> {
@@ -53,6 +93,7 @@ public class AutoFishMod implements ClientModInitializer {
                 if (client.player != null) {
                     client.player.sendMessage(Text.of("§e[AutoFish] " + (enabled ? "§aBẬT BOT" : "§cTẮT BOT")), false);
                 }
+                DebugLogger.log("Toggle enabled=" + enabled);
                 if (!enabled) {
                     resetState(client);
                 } else {
@@ -62,18 +103,54 @@ public class AutoFishMod implements ClientModInitializer {
                 }
             }
 
+            if (debugKey.wasPressed()) {
+                DebugLogger.toggle(client);
+            }
+
             if (!enabled || client.player == null || client.interactionManager == null) return;
 
-            handleTick(client);
+            try {
+                handleTick(client);
+            } catch (Exception e) {
+                // Never let a bug in the bot crash the client tick loop; log it
+                // (if debug mode is on) and try to recover to a safe state.
+                DebugLogger.logException("handleTick", e);
+                resetState(client);
+            }
         });
     }
 
+    /** Strip Vietnamese diacritics and lowercase, for robust fuzzy matching of server chat text. */
+    private static String normalize(String input) {
+        String decomposed = Normalizer.normalize(input.toLowerCase(), Normalizer.Form.NFD);
+        String noDiacritics = DIACRITICS.matcher(decomposed).replaceAll("");
+        return noDiacritics.replace('đ', 'd');
+    }
+
     private void onChatMessage(String text) {
-        String clean = text.toLowerCase();
-        if (clean.contains("cần phải gắn mồi") || clean.contains("can phai gan moi")) {
-            if (currentState != State.BAITING && currentState != State.PICK_BAIT) {
+        String normalized = normalize(text);
+        boolean isBaitTrigger = false;
+        for (String phrase : BAIT_TRIGGER_PHRASES) {
+            if (normalized.contains(phrase)) {
+                isBaitTrigger = true;
+                break;
+            }
+        }
+
+        if (isBaitTrigger) {
+            DebugLogger.log("Chat matched bait-trigger phrase. raw='" + text + "' state=" + currentState);
+            if (currentState != State.BAITING && currentState != State.PICK_BAIT
+                    && currentState != State.APPLY_BAIT && currentState != State.RETURN_BAIT) {
+                MinecraftClient client = MinecraftClient.getInstance();
+                // If we were mid-cast/reeling, let go of the rod first so opening
+                // the inventory doesn't leave a stuck bobber.
+                if (currentState == State.FISHING || currentState == State.WAITING_BITE) {
+                    releaseRod(client);
+                }
                 currentState = State.BAITING;
                 stateTimer = 5;
+            } else {
+                DebugLogger.log("Bait trigger ignored, already in a baiting state.");
             }
         }
     }
@@ -85,6 +162,10 @@ public class AutoFishMod implements ClientModInitializer {
             latestActionHud = clean;
             lastBarTime = System.currentTimeMillis();
             lastActiveFishingTime = System.currentTimeMillis();
+            if (DebugLogger.isEnabled() && !clean.equals(lastLoggedHud)) {
+                DebugLogger.log("HUD raw='" + rawText.replace("\u00a7", "&") + "' clean='" + clean + "'");
+                lastLoggedHud = clean;
+            }
         }
     }
 
@@ -98,8 +179,14 @@ public class AutoFishMod implements ClientModInitializer {
             }
         }
 
+        if (DebugLogger.isEnabled() && currentState != lastLoggedState) {
+            DebugLogger.log("STATE " + lastLoggedState + " -> " + currentState + " (timer=" + stateTimer + ")");
+            lastLoggedState = currentState;
+        }
+
         if (now - lastHardResetTime > HARD_RESET_INTERVAL_MS && currentState != State.HARD_RESET_WAIT) {
             client.player.sendMessage(Text.of("§d[AutoFish] Hoạt động 30 phút, tạm nghỉ 10s an toàn..."), false);
+            DebugLogger.log("Hard reset triggered.");
             releaseRod(client);
             currentState = State.HARD_RESET_WAIT;
             stateTimer = 200;
@@ -136,6 +223,7 @@ public class AutoFishMod implements ClientModInitializer {
 
             case PICK_BAIT:
                 if (client.player.currentScreenHandler != null) {
+                    DebugLogger.log("PICK_BAIT screenHandler=" + client.player.currentScreenHandler.getClass().getSimpleName());
                     client.interactionManager.clickSlot(client.player.currentScreenHandler.syncId, 36, 0, SlotActionType.PICKUP, client.player);
                 }
                 currentState = State.APPLY_BAIT;
@@ -178,6 +266,7 @@ public class AutoFishMod implements ClientModInitializer {
                 setShift(client, false);
                 if (now - lastActiveFishingTime > MAX_IDLE_TIMEOUT_MS) {
                     client.player.sendMessage(Text.of("§c[AutoFish] Phát hiện kẹt quá 60s! Quăng lại..."), false);
+                    DebugLogger.log("Idle timeout in WAITING_BITE, recasting.");
                     releaseRod(client);
                     currentState = State.PREPARE;
                     stateTimer = 20;
@@ -192,39 +281,76 @@ public class AutoFishMod implements ClientModInitializer {
             case FISHING:
                 if (now - lastBarTime > 1200) {
                     setShift(client, false);
-                    pid.reset();
                     currentState = State.PREPARE;
                     stateTimer = 30;
                     break;
                 }
 
-                handlePIDMovement(client);
+                handleFishingBarControl(client);
                 break;
         }
     }
 
-    private void handlePIDMovement(MinecraftClient client) {
+    /**
+     * Two-state (bang-bang) control with hysteresis, steering the star icon
+     * toward the nearest target cell instead of the midpoint of the whole bar.
+     * This matches the actual minigame mechanic: holding sneak moves the star
+     * right, releasing it moves the star left; there is no proportional force,
+     * so a PID controller (designed for continuous force output) is the wrong
+     * tool and tends to jitter when the raw text indices are noisy.
+     */
+    private void handleFishingBarControl(MinecraftClient client) {
         int dotX = -1;
-        for (String icon : new String[]{"☀️", "☀", "⭐", "★", "☆"}) {
+        String matchedIcon = null;
+        for (String icon : STAR_ICONS) {
             int idx = latestActionHud.indexOf(icon);
             if (idx != -1) {
                 dotX = idx;
+                matchedIcon = icon;
                 break;
             }
         }
 
-        int firstBlock = latestActionHud.indexOf("█");
-        int lastBlock = latestActionHud.lastIndexOf("█");
-
-        if (dotX != -1 && firstBlock != -1 && lastBlock != -1) {
-            double barX = (firstBlock + lastBlock) / 2.0;
-            double pwr = pid.calculate(barX, dotX);
-
-            boolean hold = (pwr > 0);
-            setShift(client, hold);
-        } else {
-            setShift(client, false);
+        List<Integer> targetCells = new ArrayList<>();
+        for (int i = 0; i < latestActionHud.length(); i++) {
+            if (latestActionHud.charAt(i) == TARGET_CELL_CHAR) {
+                targetCells.add(i);
+            }
         }
+
+        if (dotX == -1 || targetCells.isEmpty()) {
+            setShift(client, false);
+            DebugLogger.log("FISHING no-signal dotX=" + dotX + " targetCells=" + targetCells.size()
+                    + " hud='" + latestActionHud + "'");
+            return;
+        }
+
+        int nearest = targetCells.get(0);
+        int bestDist = Math.abs(nearest - dotX);
+        for (int cell : targetCells) {
+            int dist = Math.abs(cell - dotX);
+            if (dist < bestDist) {
+                bestDist = dist;
+                nearest = cell;
+            }
+        }
+
+        double error = nearest - dotX; // positive => target is to the right of the star
+
+        boolean hold;
+        if (error > HYSTERESIS) {
+            hold = true;
+        } else if (error < -HYSTERESIS) {
+            hold = false;
+        } else {
+            hold = shouldHoldShift; // inside the deadband: keep previous state, avoid flicker
+        }
+
+        setShift(client, hold);
+
+        DebugLogger.log("FISHING icon=" + matchedIcon + " dotX=" + dotX
+                + " nearestTarget=" + nearest + " targetCells=" + targetCells.size()
+                + " error=" + error + " hold=" + hold + " hud='" + latestActionHud + "'");
     }
 
     private void setShift(MinecraftClient client, boolean hold) {
@@ -253,7 +379,6 @@ public class AutoFishMod implements ClientModInitializer {
         currentState = State.IDLE;
         stateTimer = 0;
         setShift(client, false);
-        pid.reset();
         if (client.currentScreen != null && client.player != null) {
             client.player.closeHandledScreen();
         }
