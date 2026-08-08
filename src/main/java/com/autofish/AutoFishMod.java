@@ -179,14 +179,30 @@ public class AutoFishMod implements ClientModInitializer {
     private void parseActionHud(String rawText) {
         if (rawText == null) return;
         String clean = rawText.replaceAll("§[0-9a-fk-orA-FK-OR]", "");
-        if (clean.contains("█") || clean.contains("☀️") || clean.contains("☀") || clean.contains("%") || clean.contains("[")) {
-            latestActionHud = clean;
-            lastBarTime = System.currentTimeMillis();
-            lastActiveFishingTime = System.currentTimeMillis();
-            if (DebugLogger.isEnabled() && !clean.equals(lastLoggedHud)) {
-                DebugLogger.log("HUD raw='" + rawText.replace("\u00a7", "&") + "' clean='" + clean + "'");
-                lastLoggedHud = clean;
+
+        // Only treat this as the fishing minigame bar if it contains the
+        // target-cell character or one of the star icons — these are specific
+        // to the fishing bar. A generic check for '[' or '%' also matches
+        // unrelated overlay/chat text (e.g. guild broadcast messages like
+        // "[Tong Mon] Dat vo chu"), which was falsely hijacking the state
+        // machine into a fake FISHING state and wasting the real bite window.
+        boolean looksLikeFishingBar = clean.indexOf(TARGET_CELL_CHAR) != -1;
+        if (!looksLikeFishingBar) {
+            for (String icon : STAR_ICONS) {
+                if (clean.contains(icon)) {
+                    looksLikeFishingBar = true;
+                    break;
+                }
             }
+        }
+        if (!looksLikeFishingBar) return;
+
+        latestActionHud = clean;
+        lastBarTime = System.currentTimeMillis();
+        lastActiveFishingTime = System.currentTimeMillis();
+        if (DebugLogger.isEnabled() && !clean.equals(lastLoggedHud)) {
+            DebugLogger.log("HUD raw='" + rawText.replace("\u00a7", "&") + "' clean='" + clean + "'");
+            lastLoggedHud = clean;
         }
     }
 
