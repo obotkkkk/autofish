@@ -322,6 +322,15 @@ public class AutoFishMod implements ClientModInitializer {
                 currentState = State.WAITING_BITE;
                 lastActiveFishingTime = now;
                 stateTimer = 20;
+                // Critical: clear any leftover bar text/percent from the
+                // previous catch. Without this, a stale 99-100% reading
+                // carried over from the last episode caused the NEXT episode
+                // to be instantly (falsely) "caught" the moment FISHING
+                // started, skipping the real minigame entirely -- confirmed
+                // in logs where "FISHING reached 100%, reeling in." fired in
+                // the same millisecond as "WAITING_BITE -> FISHING".
+                latestActionHud = "";
+                lastLoggedHud = null;
                 break;
 
             case WAITING_BITE:
@@ -452,13 +461,22 @@ public class AutoFishMod implements ClientModInitializer {
             hold = shouldHoldShift; // inside the deadband: keep previous state, avoid flicker
         }
 
-        // Edge-stall detection: if the star's index hasn't moved for a
-        // stretch of ticks while we're actively holding/releasing to correct
-        // a real (non-deadband) error, the star is very likely pinned against
-        // the left/right edge of the bar and our steady command isn't doing
-        // anything. Briefly invert direction to try to pull it back off the
-        // edge so it has room to travel toward the target again.
-        if (dotX == lastDotX && Math.abs(error) > HYSTERESIS) {
+        // Edge-stall detection: only makes sense when the star is actually
+        // pinned against the visible left/right wall of the bar -- NOT just
+        // "hasn't moved this tick" anywhere in the middle, which happens
+        // constantly and harmlessly whenever our tick rate outpaces the HUD's
+        // own refresh rate. Triggering the kick outside of a real edge was
+        // launching the star into wild overshoot oscillations across the
+        // whole bar (confirmed in logs: error jumping to ±20 right after a
+        // false kick), which made later fishing attempts much less stable
+        // than the first.
+        int bracketStart = latestActionHud.lastIndexOf('[');
+        int bracketEnd = latestActionHud.indexOf(']', bracketStart);
+        boolean nearLeftEdge = bracketStart != -1 && dotX <= bracketStart + 2;
+        boolean nearRightEdge = bracketEnd != -1 && dotX >= bracketEnd - 3;
+        boolean atEdge = nearLeftEdge || nearRightEdge;
+
+        if (atEdge && dotX == lastDotX && Math.abs(error) > HYSTERESIS) {
             stallTicks++;
         } else {
             stallTicks = 0;
@@ -466,7 +484,7 @@ public class AutoFishMod implements ClientModInitializer {
         lastDotX = dotX;
 
         boolean kicked = false;
-        if (stallTicks > STALL_TICKS_THRESHOLD) {
+        if (atEdge && stallTicks > STALL_TICKS_THRESHOLD) {
             hold = !hold;
             kicked = true;
             stallTicks = 0;
