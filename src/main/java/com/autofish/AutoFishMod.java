@@ -232,9 +232,9 @@ public class AutoFishMod implements ClientModInitializer {
         if (client.options != null && client.options.sneakKey != null) {
             client.options.sneakKey.setPressed(hold);
         }
-        if (client.player != null && client.player.input != null) {
-            client.player.input.sneaking = hold;
-        }
+        // NOTE: as of MC 1.21.2+, Input/KeyboardInput no longer expose a mutable
+        // `sneaking` field — the engine rebuilds an immutable PlayerInput record
+        // from sneakKey's pressed state each tick, so setPressed() above is sufficient.
     }
 
     private void selectFishingRod(MinecraftClient client) {
