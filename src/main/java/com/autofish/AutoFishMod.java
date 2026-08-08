@@ -38,8 +38,10 @@ public class AutoFishMod implements ClientModInitializer {
     private static long lastBarTime = 0;
 
     private static long lastActiveFishingTime = 0;
+    private static long fishingStartTime = 0;
     private static long lastHardResetTime = 0;
     private static final long MAX_IDLE_TIMEOUT_MS = 60000;
+    private static final long MAX_FISHING_DURATION_MS = 90000;
     private static final long HARD_RESET_INTERVAL_MS = 1800000;
 
     // --- Fishing minigame control tuning ---
@@ -49,7 +51,14 @@ public class AutoFishMod implements ClientModInitializer {
     // bar, since the white target cells can appear as multiple separate
     // clusters (not one contiguous block).
     private static final char TARGET_CELL_CHAR = '█';
-    private static final String[] STAR_ICONS = {"🌟", "☀️", "☀", "⭐", "★", "☆"};
+    // Confirmed from live debug logs: this server's fishing minigame uses the
+    // "glowing star" emoji specifically (U+1F31F). Other icons like the plain
+    // "☀" (U+2600) sun symbol are used elsewhere by the server (e.g. a
+    // "+1 điểm" reward/points notification) and must NOT be treated as the
+    // fishing star — doing so previously froze the bot permanently in the
+    // FISHING state whenever that unrelated message appeared, because it kept
+    // refreshing lastBarTime without ever containing real bar data.
+    private static final String[] STAR_ICONS = {"🌟"};
     // Hysteresis band (in character-cells) around the target: while the star
     // is within this band we keep the previous shift state instead of
     // flip-flopping every tick, which is what a raw PID with a noisy index
@@ -186,16 +195,21 @@ public class AutoFishMod implements ClientModInitializer {
         // unrelated overlay/chat text (e.g. guild broadcast messages like
         // "[Tong Mon] Dat vo chu"), which was falsely hijacking the state
         // machine into a fake FISHING state and wasting the real bite window.
-        boolean looksLikeFishingBar = clean.indexOf(TARGET_CELL_CHAR) != -1;
-        if (!looksLikeFishingBar) {
-            for (String icon : STAR_ICONS) {
-                if (clean.contains(icon)) {
-                    looksLikeFishingBar = true;
-                    break;
-                }
+        // Only treat this as the fishing minigame bar if it contains BOTH the
+        // target-cell character and a star icon together. Every real
+        // fishing-bar frame observed in debug logs has both; requiring only
+        // one or the other let unrelated overlay text (chat/guild broadcasts
+        // with '[', or reward notifications with a lone star-like symbol)
+        // falsely hijack the state machine.
+        boolean hasTargetCell = clean.indexOf(TARGET_CELL_CHAR) != -1;
+        boolean hasStarIcon = false;
+        for (String icon : STAR_ICONS) {
+            if (clean.contains(icon)) {
+                hasStarIcon = true;
+                break;
             }
         }
-        if (!looksLikeFishingBar) return;
+        if (!hasTargetCell || !hasStarIcon) return;
 
         latestActionHud = clean;
         lastBarTime = System.currentTimeMillis();
@@ -312,12 +326,25 @@ public class AutoFishMod implements ClientModInitializer {
 
                 if (now - lastBarTime < 1000) {
                     currentState = State.FISHING;
+                    fishingStartTime = now;
                 }
                 break;
 
             case FISHING:
                 if (now - lastBarTime > 1200) {
                     setShift(client, false);
+                    currentState = State.PREPARE;
+                    stateTimer = 30;
+                    break;
+                }
+                // Hard safety net: even if lastBarTime keeps getting refreshed
+                // by something unexpected, never stay in FISHING longer than
+                // this. Prevents the bot from ever hanging indefinitely again.
+                if (now - fishingStartTime > MAX_FISHING_DURATION_MS) {
+                    client.player.sendMessage(Text.of("§c[AutoFish] Câu cá quá lâu (>90s), buộc reset..."), false);
+                    DebugLogger.log("FISHING max-duration safety net triggered.");
+                    setShift(client, false);
+                    releaseRod(client);
                     currentState = State.PREPARE;
                     stateTimer = 30;
                     break;
